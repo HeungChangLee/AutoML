@@ -16,6 +16,7 @@ class Architect(object):
     self.model = model
     self.optimizer = torch.optim.Adam(self.model.arch_parameters(),
         lr=args.arch_learning_rate, betas=(0.5, 0.999), weight_decay=args.arch_weight_decay)
+    self.lr = args.arch_learning_rate
 
   def _compute_unrolled_model(self, input, target, eta, network_optimizer):
     loss = self.model._loss(input, target)
@@ -89,4 +90,8 @@ class Architect(object):
       p.data.add_(R, v)
 
     return [(x-y).div_(2*R) for x, y in zip(grads_p, grads_n)]
+  
+  def reset_optimizer(self):
+    self.optimizer = torch.optim.Adam(self.model.arch_parameters(),
+        lr=self.lr, betas=(0.5, 0.999), weight_decay=self.network_weight_decay)    
 

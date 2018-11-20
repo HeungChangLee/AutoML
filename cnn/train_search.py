@@ -20,14 +20,14 @@ from architect import Architect
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
-parser.add_argument('--batch_size', type=int, default=64, help='batch size')
+parser.add_argument('--batch_size', type=int, default=32, help='batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
-parser.add_argument('--epochs', type=int, default=50, help='num of training epochs')
+parser.add_argument('--epochs', type=int, default=30, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
 parser.add_argument('--layers', type=int, default=8, help='total number of layers')
 parser.add_argument('--model_path', type=str, default='saved_models', help='path to save the model')
@@ -41,6 +41,8 @@ parser.add_argument('--train_portion', type=float, default=0.5, help='portion of
 parser.add_argument('--unrolled', action='store_true', default=False, help='use one-step unrolled validation loss')
 parser.add_argument('--arch_learning_rate', type=float, default=3e-4, help='learning rate for arch encoding')
 parser.add_argument('--arch_weight_decay', type=float, default=1e-3, help='weight decay for arch encoding')
+#Added
+parser.add_argument('--max_hidden_node_num', type=int, default=5, help='max number of hidden nodes in a cell')
 args = parser.parse_args()
 
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
@@ -93,38 +95,56 @@ def main():
   train_queue = torch.utils.data.DataLoader(
       train_data, batch_size=args.batch_size,
       sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-      pin_memory=True, num_workers=2)
+      pin_memory=True, num_workers=0)
 
   valid_queue = torch.utils.data.DataLoader(
       train_data, batch_size=args.batch_size,
       sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-      pin_memory=True, num_workers=2)
+      pin_memory=True, num_workers=0)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
   architect = Architect(model, args)
 
-  for epoch in range(args.epochs):
-    scheduler.step()
-    lr = scheduler.get_lr()[0]
-    logging.info('epoch %d lr %e', epoch, lr)
-
-    genotype = model.genotype()
-    logging.info('genotype = %s', genotype)
-
-    print(F.softmax(model.alphas_normal, dim=-1))
-    print(F.softmax(model.alphas_reduce, dim=-1))
-
-    # training
-    train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
-    logging.info('train_acc %f', train_acc)
-
-    # validation
-    valid_acc, valid_obj = infer(valid_queue, model, criterion)
-    logging.info('valid_acc %f', valid_acc)
-
-    utils.save(model, os.path.join(args.save, 'weights.pt'))
+  for node_nums in range(args.max_hidden_node_num):
+    for epoch in range(args.epochs):
+      scheduler.step()
+      lr = scheduler.get_lr()[0]
+      logging.info('epoch %d lr %e', epoch, lr)
+  
+      genotype = model.genotype()
+      logging.info('genotype = %s', genotype)
+  
+      #print(F.softmax(model.alphas_normal, dim=-1))
+      #print(F.softmax(model.alphas_reduce, dim=-1))
+      normal_weights, reduce_weights = model._compute_weight_from_alphas()
+      #normal_weights = torch.from_numpy(normal_weights)
+      #reduce_weights = torch.from_numpy(reduce_weights)
+      print(normal_weights)
+      print(reduce_weights)
+  
+      # training
+      train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
+      logging.info('train_acc %f', train_acc)
+  
+      # validation
+      if (epoch+1) % 10 == 0:
+        valid_acc, valid_obj = infer(valid_queue, model, criterion)
+        logging.info('valid_acc %f', valid_acc)
+  
+      utils.save(model, os.path.join(args.save, 'weights.pt'))
+    
+    model.add_node_to_cell()
+    model = model.cuda()
+    optimizer = torch.optim.SGD(
+        model.parameters(),
+        args.learning_rate,
+        momentum=args.momentum,
+        weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+          optimizer, float(args.epochs), eta_min=args.learning_rate_min)
+    architect.reset_optimizer()
 
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
@@ -161,6 +181,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
 
     if step % args.report_freq == 0:
       logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+    #if step >= 50:
+      #break
 
   return top1.avg, objs.avg
 
