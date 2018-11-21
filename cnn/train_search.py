@@ -20,14 +20,14 @@ from architect import Architect
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
-parser.add_argument('--batch_size', type=int, default=32, help='batch size')
+parser.add_argument('--batch_size', type=int, default=256, help='batch size')
 parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
-parser.add_argument('--epochs', type=int, default=30, help='num of training epochs')
+parser.add_argument('--epochs', type=int, default=1, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
 parser.add_argument('--layers', type=int, default=8, help='total number of layers')
 parser.add_argument('--model_path', type=str, default='saved_models', help='path to save the model')
@@ -35,7 +35,7 @@ parser.add_argument('--cutout', action='store_true', default=False, help='use cu
 parser.add_argument('--cutout_length', type=int, default=16, help='cutout length')
 parser.add_argument('--drop_path_prob', type=float, default=0.3, help='drop path probability')
 parser.add_argument('--save', type=str, default='EXP', help='experiment name')
-parser.add_argument('--seed', type=int, default=2, help='random seed')
+parser.add_argument('--seed', type=int, default=1, help='random seed')
 parser.add_argument('--grad_clip', type=float, default=5, help='gradient clipping')
 parser.add_argument('--train_portion', type=float, default=0.5, help='portion of training data')
 parser.add_argument('--unrolled', action='store_true', default=False, help='use one-step unrolled validation loss')
@@ -91,16 +91,19 @@ def main():
   num_train = len(train_data)
   indices = list(range(num_train))
   split = int(np.floor(args.train_portion * num_train))
-
+  
+  batch_size = args.batch_size
+  train_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[:split])
+  valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train])
   train_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[:split]),
-      pin_memory=True, num_workers=0)
+      train_data, batch_size=batch_size,
+      sampler=train_sampler,
+      pin_memory=False, num_workers=0)
 
   valid_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=args.batch_size,
-      sampler=torch.utils.data.sampler.SubsetRandomSampler(indices[split:num_train]),
-      pin_memory=True, num_workers=0)
+      train_data, batch_size=batch_size,
+      sampler=valid_sampler,
+      pin_memory=False, num_workers=0)
 
   scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
@@ -129,19 +132,32 @@ def main():
       logging.info('train_acc %f', train_acc)
   
       # validation
-      if (epoch+1) % 10 == 0:
+      if (epoch+1) % 1 == 0:
         valid_acc, valid_obj = infer(valid_queue, model, criterion)
         logging.info('valid_acc %f', valid_acc)
   
       utils.save(model, os.path.join(args.save, 'weights.pt'))
     
     model.add_node_to_cell()
-    model = model.cuda()
+    model = model.cuda()    
+    
     optimizer = torch.optim.SGD(
         model.parameters(),
         args.learning_rate,
         momentum=args.momentum,
         weight_decay=args.weight_decay)
+    
+    if node_nums != 2:    
+      batch_size = int(batch_size/2)
+    train_queue = torch.utils.data.DataLoader(
+      train_data, batch_size=batch_size,
+      sampler=train_sampler,
+      pin_memory=False, num_workers=0)
+    valid_queue = torch.utils.data.DataLoader(
+      train_data, batch_size=batch_size,
+      sampler=valid_sampler,
+      pin_memory=False, num_workers=0)
+    
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
           optimizer, float(args.epochs), eta_min=args.learning_rate_min)
     architect.reset_optimizer()
@@ -181,8 +197,8 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
 
     if step % args.report_freq == 0:
       logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-    #if step >= 50:
-      #break
+    if step >= 50:
+      break
 
   return top1.avg, objs.avg
 
@@ -191,23 +207,26 @@ def infer(valid_queue, model, criterion):
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
-  model.eval()
-
-  for step, (input, target) in enumerate(valid_queue):
-    input = Variable(input, volatile=True).cuda()
-    target = Variable(target, volatile=True).cuda(async=True)
-
-    logits = model(input)
-    loss = criterion(logits, target)
-
-    prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
-    n = input.size(0)
-    objs.update(loss.data[0], n)
-    top1.update(prec1.data[0], n)
-    top5.update(prec5.data[0], n)
-
-    if step % args.report_freq == 0:
-      logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+  model.eval()  
+  
+  with torch.no_grad():
+    for step, (input, target) in enumerate(valid_queue):      
+      input = Variable(input).cuda()
+      target = Variable(target).cuda(async=True)
+  
+      logits = model(input)
+      loss = criterion(logits, target)
+  
+      prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+      n = input.size(0)
+      objs.update(loss.data[0], n)
+      top1.update(prec1.data[0], n)
+      top5.update(prec5.data[0], n)
+      
+      if step % args.report_freq == 0:
+        logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
+      if step >= 50:
+        break    
 
   return top1.avg, objs.avg
 
