@@ -12,22 +12,25 @@ import torch.utils
 import torch.nn.functional as F
 import torchvision.datasets as dset
 import torch.backends.cudnn as cudnn
+import pickle
 
 from torch.autograd import Variable
 from model_search import Network
 from architect import Architect
 
+from genotypes import PRIMITIVES
+from genotypes import Genotype
 
 parser = argparse.ArgumentParser("cifar")
 parser.add_argument('--data', type=str, default='../data', help='location of the data corpus')
 parser.add_argument('--batch_size', type=int, default=256, help='batch size')
-parser.add_argument('--learning_rate', type=float, default=0.025, help='init learning rate')
+parser.add_argument('--learning_rate', type=float, default=0.05, help='init learning rate')
 parser.add_argument('--learning_rate_min', type=float, default=0.001, help='min learning rate')
 parser.add_argument('--momentum', type=float, default=0.9, help='momentum')
 parser.add_argument('--weight_decay', type=float, default=3e-4, help='weight decay')
 parser.add_argument('--report_freq', type=float, default=50, help='report frequency')
 parser.add_argument('--gpu', type=int, default=0, help='gpu device id')
-parser.add_argument('--epochs', type=int, default=1, help='num of training epochs')
+parser.add_argument('--epochs', type=int, default=300, help='num of training epochs')
 parser.add_argument('--init_channels', type=int, default=16, help='num of init channels')
 parser.add_argument('--layers', type=int, default=8, help='total number of layers')
 parser.add_argument('--model_path', type=str, default='saved_models', help='path to save the model')
@@ -42,7 +45,7 @@ parser.add_argument('--unrolled', action='store_true', default=False, help='use 
 parser.add_argument('--arch_learning_rate', type=float, default=3e-4, help='learning rate for arch encoding')
 parser.add_argument('--arch_weight_decay', type=float, default=1e-3, help='weight decay for arch encoding')
 #Added
-parser.add_argument('--max_hidden_node_num', type=int, default=5, help='max number of hidden nodes in a cell')
+parser.add_argument('--max_hidden_node_num', type=int, default=1, help='max number of hidden nodes in a cell')
 args = parser.parse_args()
 
 args.save = 'search-{}-{}'.format(args.save, time.strftime("%Y%m%d-%H%M%S"))
@@ -57,19 +60,39 @@ logging.getLogger().addHandler(fh)
 
 
 CIFAR_CLASSES = 10
+model_path = 'search-EXP-20181203-165707/weights.pt'
+node_num = 4
+search_epoch = 100
 
+def w_parse(weights):
+  gene = []
+  n = 2
+  start = 0
+  for i in range(node_num):      
+    end = start + n
+    W = weights[start:end].copy()
+    edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x]))))[:2]
+    for j in edges:
+      k_best = None
+      for k in range(len(W[j])):        
+        if k_best is None or W[j][k] > W[j][k_best]:
+          k_best = k
+      gene.append((PRIMITIVES[k_best], j))
+    start = end
+    n += 1
+  return gene
 
-def main():
+def main(seed):
   if not torch.cuda.is_available():
     logging.info('no gpu device available')
     sys.exit(1)
 
-  np.random.seed(args.seed)
+  np.random.seed(seed)
   torch.cuda.set_device(args.gpu)
   cudnn.benchmark = True
-  torch.manual_seed(args.seed)
+  torch.manual_seed(seed)
   cudnn.enabled=True
-  torch.cuda.manual_seed(args.seed)
+  torch.cuda.manual_seed(seed)
   logging.info('gpu device = %d' % args.gpu)
   logging.info("args = %s", args)
 
@@ -83,7 +106,8 @@ def main():
       model.parameters(),
       args.learning_rate,
       momentum=args.momentum,
-      weight_decay=args.weight_decay)
+      weight_decay=args.weight_decay,
+      nesterov=True)
 
   train_transform, valid_transform = utils._data_transforms_cifar10(args)
   train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
@@ -109,59 +133,71 @@ def main():
         optimizer, float(args.epochs), eta_min=args.learning_rate_min)
 
   architect = Architect(model, args)
+  #model.load_state_dict(torch.load(model_path))
+  
+  for epoch in range(args.epochs):
+    scheduler.step()
+    lr = scheduler.get_lr()[0]
+    logging.info('epoch %d lr %e', epoch, lr)
 
-  for node_nums in range(args.max_hidden_node_num):
-    for epoch in range(args.epochs):
-      scheduler.step()
-      lr = scheduler.get_lr()[0]
-      logging.info('epoch %d lr %e', epoch, lr)
-  
-      genotype = model.genotype()
-      logging.info('genotype = %s', genotype)
-  
-      #print(F.softmax(model.alphas_normal, dim=-1))
-      #print(F.softmax(model.alphas_reduce, dim=-1))
-      normal_weights, reduce_weights = model._compute_weight_from_alphas()
-      #normal_weights = torch.from_numpy(normal_weights)
-      #reduce_weights = torch.from_numpy(reduce_weights)
-      print(normal_weights)
-      print(reduce_weights)
-  
-      # training
-      train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
-      logging.info('train_acc %f', train_acc)
-  
-      # validation
-      if (epoch+1) % 1 == 0:
-        valid_acc, valid_obj = infer(valid_queue, model, criterion)
-        logging.info('valid_acc %f', valid_acc)
-  
-      utils.save(model, os.path.join(args.save, 'weights.pt'))
-    
-    model.add_node_to_cell()
-    model = model.cuda()    
-    
-    optimizer = torch.optim.SGD(
-        model.parameters(),
-        args.learning_rate,
-        momentum=args.momentum,
-        weight_decay=args.weight_decay)
-    
-    if node_nums != 2:    
-      batch_size = int(batch_size/2)
-    train_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=batch_size,
-      sampler=train_sampler,
-      pin_memory=False, num_workers=0)
-    valid_queue = torch.utils.data.DataLoader(
-      train_data, batch_size=batch_size,
-      sampler=valid_sampler,
-      pin_memory=False, num_workers=0)
-    
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-          optimizer, float(args.epochs), eta_min=args.learning_rate_min)
-    architect.reset_optimizer()
+    #genotype = model.genotype()
+    #logging.info('genotype = %s', genotype)
 
+    #print(model.alphas_normal)
+    #print(model.alphas_reduce)
+    #normal_weights, reduce_weights = model._compute_weight_from_alphas()
+    #normal_weights = torch.from_numpy(normal_weights)
+    #reduce_weights = torch.from_numpy(reduce_weights)
+    #print(normal_weights)
+    #print(reduce_weights)
+
+    # training
+    train_acc, train_obj = train(train_queue, valid_queue, model, architect, criterion, optimizer, lr)
+    logging.info('train_acc %f', train_acc)
+
+    # validation
+    if (epoch+1) % 5 == 0:
+      valid_acc, valid_obj = infer(valid_queue, model, criterion)
+      logging.info('valid_acc %f', valid_acc)
+
+    utils.save(model, os.path.join(args.save, 'weights.pt'))
+  
+  k = sum(1 for i in range(node_num) for n in range(2+i))
+  num_ops = len(PRIMITIVES)
+  acc_mat_normal = np.zeros((k, num_ops))
+  cnt_mat_normal = np.zeros((k, num_ops))
+  acc_mat_reduce = np.zeros((k, num_ops))
+  cnt_mat_reduce = np.zeros((k, num_ops))
+  np.set_printoptions(precision=3)
+  for epoch in range(search_epoch):
+    print ('Search epoch: ', epoch)
+    model.generate_random_alphas()
+    acc_normal, cnt_normal, acc_reduce, cnt_reduce = infer_for_search(valid_queue, model)
+    
+    acc_mat_normal = acc_mat_normal + acc_normal
+    cnt_mat_normal = cnt_mat_normal + cnt_normal
+    acc_mat_reduce = acc_mat_reduce + acc_reduce
+    cnt_mat_reduce = cnt_mat_reduce + cnt_reduce    
+    
+    avg_acc_normal = np.divide(acc_mat_normal, cnt_mat_normal)
+    avg_acc_normal[np.isnan(avg_acc_normal)] = 0
+    avg_acc_normal[np.isinf(avg_acc_normal)] = 0
+    
+    avg_acc_reduce = np.divide(acc_mat_reduce, cnt_mat_reduce)
+    avg_acc_reduce[np.isnan(avg_acc_reduce)] = 0
+    avg_acc_reduce[np.isinf(avg_acc_reduce)] = 0
+    
+    print ('Avg accuracies')
+    print (avg_acc_normal)
+    print (avg_acc_reduce, '\n')
+    
+    gene_normal = w_parse(avg_acc_normal)
+    gene_reduce = w_parse(avg_acc_reduce)
+    print ('Normal genotype: ', gene_normal)
+    print ('Reduce genotype: ', gene_reduce, '\n')
+    
+  with open(os.path.join(args.save, 'search_results.pkl'), 'wb') as f:    
+      pickle.dump((acc_mat_normal, cnt_mat_normal, acc_mat_reduce, cnt_mat_reduce), f)  
 
 def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
   objs = utils.AvgrageMeter()
@@ -176,13 +212,16 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
     target = Variable(target, requires_grad=False).cuda(async=True)
 
     # get a random minibatch from the search queue with replacement
-    input_search, target_search = next(iter(valid_queue))
-    input_search = Variable(input_search, requires_grad=False).cuda()
-    target_search = Variable(target_search, requires_grad=False).cuda(async=True)
+    #input_search, target_search = next(iter(valid_queue))
+    #input_search = Variable(input_search, requires_grad=False).cuda()
+    #target_search = Variable(target_search, requires_grad=False).cuda(async=True)
 
-    architect.step(input, target, input_search, target_search, lr, optimizer, unrolled=args.unrolled)
+    #architect.step(input, target, input_search, target_search, lr, optimizer, unrolled=args.unrolled)
 
     optimizer.zero_grad()
+    model.generate_random_alphas()
+    #print(model.alphas_normal)
+    #print(model.alphas_reduce)    
     logits = model(input)
     loss = criterion(logits, target)
 
@@ -197,23 +236,38 @@ def train(train_queue, valid_queue, model, architect, criterion, optimizer, lr):
 
     if step % args.report_freq == 0:
       logging.info('train %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-    if step >= 50:
-      break
+    #if step >= 50:
+      #break
 
   return top1.avg, objs.avg
 
+def train_arch(train_queue, valid_queue, model, architect, criterion, optimizer, lr):    
+  for step, (input, target) in enumerate(train_queue):
+    model.train()
+    n = input.size(0)
+
+    input = Variable(input, requires_grad=False).cuda()
+    target = Variable(target, requires_grad=False).cuda(async=True)
+
+    # get a random minibatch from the search queue with replacement
+    input_search, target_search = next(iter(valid_queue))
+    input_search = Variable(input_search, requires_grad=False).cuda()
+    target_search = Variable(target_search, requires_grad=False).cuda(async=True)
+
+    architect.step(input, target, input_search, target_search, lr, optimizer, unrolled=args.unrolled) 
 
 def infer(valid_queue, model, criterion):
   objs = utils.AvgrageMeter()
   top1 = utils.AvgrageMeter()
   top5 = utils.AvgrageMeter()
-  model.eval()  
+  model.eval()    
   
   with torch.no_grad():
     for step, (input, target) in enumerate(valid_queue):      
       input = Variable(input).cuda()
       target = Variable(target).cuda(async=True)
-  
+      
+      model.generate_random_alphas()
       logits = model(input)
       loss = criterion(logits, target)
   
@@ -225,12 +279,43 @@ def infer(valid_queue, model, criterion):
       
       if step % args.report_freq == 0:
         logging.info('valid %03d %e %f %f', step, objs.avg, top1.avg, top5.avg)
-      if step >= 50:
-        break    
+      #if step >= 50:
+        #break    
 
   return top1.avg, objs.avg
 
+def infer_for_search(valid_queue, model):  
+  model.eval()   
+  
+  k = sum(1 for i in range(node_num) for n in range(2+i))
+  num_ops = len(PRIMITIVES)
+  acc_mat_normal = np.zeros((k, num_ops))
+  cnt_mat_normal = np.zeros((k, num_ops))
+  acc_mat_reduce = np.zeros((k, num_ops))
+  cnt_mat_reduce = np.zeros((k, num_ops))
+  with torch.no_grad():
+    for step, (input, target) in enumerate(valid_queue):      
+      input = Variable(input).cuda()
+      target = Variable(target).cuda(async=True)  
+      
+      model.generate_random_alphas()
+      logits = model(input)
+      prec1, prec5 = utils.accuracy(logits, target, topk=(1, 5))
+      valid_acc = prec1.data.cpu().numpy()
+      
+      normal_gene = model.alphas_normal.data.cpu().numpy()
+      cnt_mat_normal = cnt_mat_normal + normal_gene
+      acc_mat_normal = acc_mat_normal + normal_gene * valid_acc
+      
+      reduce_gene = model.alphas_reduce.data.cpu().numpy()
+      cnt_mat_reduce = cnt_mat_reduce + reduce_gene
+      acc_mat_reduce = acc_mat_reduce + reduce_gene * valid_acc
+      
+  return acc_mat_normal, cnt_mat_normal, acc_mat_reduce, cnt_mat_reduce
+
 
 if __name__ == '__main__':
-  main() 
+  main(1) 
+  #main(4) 
+  #main(5) 
 
