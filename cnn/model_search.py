@@ -80,7 +80,7 @@ class Network(nn.Module):
     self.fixed_edges = None
     self.init_C = stem_multiplier*C
     self.baseline = Variable(torch.zeros(1), requires_grad=False).cuda()
-    self.bl_dec = 0.95
+    self.bl_dec = 0.99
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(

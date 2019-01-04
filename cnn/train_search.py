@@ -67,7 +67,7 @@ model_path = 'search-RL-s2/weights.pt'
 node_num = 4
 search_epoch = 1 #35*100/2
 search_arch_num = 1000
-arch_opt_step = 10
+arch_opt_step = 1
 top_arch_num = 10
 
 def w_parse(weights):
@@ -157,8 +157,8 @@ def main(seed):
 
     utils.save(model, os.path.join(args.save, 'weights.pt')) 
   
-  #best_arch_search(valid_queue, model)
-  best_arch_eval(valid_queue, model, top_arch_df)
+  best_arch_search(valid_queue, model)
+  #best_arch_eval(valid_queue, model, top_arch_df)
 
 
 def train(train_queue, valid_queue, model, criterion, optimizer, lr):
@@ -225,19 +225,20 @@ def train_arch(train_queue, valid_queue, model, architect, top_arch_df):
     prec1, _ = utils.accuracy(logits, target, topk=(1, 5))
     
     #Top architecture list update
-    if len(top_arch_df) == top_arch_num:      
-      if prec1.item() > top_arch_df['Val_acc'].loc[top_arch_num-1]:
-        temp_df = pd.DataFrame([[model.sampled_weight_normal.data.cpu().numpy(),
-                             model.sampled_weight_reduce.data.cpu().numpy(), prec1.item()]], columns = ['Normal', 'Reduce', 'Val_acc'])
-        top_arch_df = top_arch_df.append(temp_df, ignore_index=True)
-        top_arch_df = top_arch_df.sort_values(by='Val_acc', ascending=False)
-        top_arch_df = top_arch_df[:top_arch_num]
-        top_arch_df = top_arch_df.reset_index(drop=True)
-    else:
-      temp_df = pd.DataFrame([[model.sampled_weight_normal.data.cpu().numpy(),
-                             model.sampled_weight_reduce.data.cpu().numpy(), prec1.item()]], columns = ['Normal', 'Reduce', 'Val_acc'])
-      top_arch_df = top_arch_df.append(temp_df, ignore_index=True)
-      top_arch_df = top_arch_df.sort_values(by='Val_acc', ascending=False)      
+    #Commented because of poor performance
+    #if len(top_arch_df) == top_arch_num:      
+      #if prec1.item() > top_arch_df['Val_acc'].loc[top_arch_num-1]:
+        #temp_df = pd.DataFrame([[model.sampled_weight_normal.data.cpu().numpy(),
+                             #model.sampled_weight_reduce.data.cpu().numpy(), prec1.item()]], columns = ['Normal', 'Reduce', 'Val_acc'])
+        #top_arch_df = top_arch_df.append(temp_df, ignore_index=True)
+        #top_arch_df = top_arch_df.sort_values(by='Val_acc', ascending=False)
+        #top_arch_df = top_arch_df[:top_arch_num]
+        #top_arch_df = top_arch_df.reset_index(drop=True)
+    #else:
+      #temp_df = pd.DataFrame([[model.sampled_weight_normal.data.cpu().numpy(),
+                             #model.sampled_weight_reduce.data.cpu().numpy(), prec1.item()]], columns = ['Normal', 'Reduce', 'Val_acc'])
+      #top_arch_df = top_arch_df.append(temp_df, ignore_index=True)
+      #top_arch_df = top_arch_df.sort_values(by='Val_acc', ascending=False)      
     
     top1.update(prec1.item(), n)
   
